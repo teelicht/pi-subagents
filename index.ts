@@ -57,6 +57,22 @@ import { handleManagementAction } from "./agent-management.js";
 
 // ExtensionConfig is now imported from ./types.js
 
+/**
+ * Derive subagent session base directory from parent session file.
+ * If parent session is ~/.pi/agent/sessions/abc123.jsonl,
+ * returns ~/.pi/agent/sessions/abc123/ as the base.
+ * Callers add runId to create the actual session root: abc123/{runId}/
+ * Falls back to a unique temp directory if no parent session.
+ */
+function getSubagentSessionRoot(parentSessionFile: string | null): string {
+	if (parentSessionFile) {
+		const baseName = path.basename(parentSessionFile, ".jsonl");
+		const sessionsDir = path.dirname(parentSessionFile);
+		return path.join(sessionsDir, baseName);
+	}
+	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
+}
+
 function loadConfig(): ExtensionConfig {
 	const configPath = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json");
 	try {
@@ -277,23 +293,22 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 			}
 
 			const scope: AgentScope = resolveExecutionAgentScope(params.agentScope);
-			currentSessionId = ctx.sessionManager.getSessionFile() ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
+			currentSessionId = parentSessionFile ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 			const agents = discoverAgents(ctx.cwd, scope).agents;
 			const runId = randomUUID().slice(0, 8);
 			const shareEnabled = params.share === true;
-			const sessionEnabled = shareEnabled || Boolean(params.sessionDir);
-			const sessionRoot = sessionEnabled
-				? params.sessionDir
-					? path.resolve(params.sessionDir)
-					: fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"))
-				: undefined;
-			if (sessionRoot) {
-				try {
-					fs.mkdirSync(sessionRoot, { recursive: true });
-				} catch {}
-			}
+			// Session root: explicit param > derived from parent session > temp fallback
+			// Sessions are always enabled now - stored alongside parent session for tracking
+			// Include runId to ensure uniqueness across multiple subagent calls
+			const sessionRoot = params.sessionDir
+				? path.resolve(params.sessionDir)
+				: path.join(getSubagentSessionRoot(parentSessionFile), runId);
+			try {
+				fs.mkdirSync(sessionRoot, { recursive: true });
+			} catch {}
 			const sessionDirForIndex = (idx?: number) =>
-				sessionRoot ? path.join(sessionRoot, `run-${idx ?? 0}`) : undefined;
+				path.join(sessionRoot, `run-${idx ?? 0}`);
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -315,8 +330,7 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 				enabled: params.artifacts !== false,
 			};
 
-			const sessionFile = ctx.sessionManager.getSessionFile() ?? null;
-			const artifactsDir = effectiveAsync ? tempArtifactsDir : getArtifactsDir(sessionFile);
+			const artifactsDir = effectiveAsync ? tempArtifactsDir : getArtifactsDir(parentSessionFile);
 
 			if (Number(hasChain) + Number(hasTasks) + Number(hasSingle) !== 1) {
 				return {
@@ -1019,12 +1033,16 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 
 	const setupDirectRun = (ctx: ExtensionContext) => {
 		const runId = randomUUID().slice(0, 8);
-		const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
+		const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
+		const sessionRoot = path.join(getSubagentSessionRoot(parentSessionFile), runId);
+		try {
+			fs.mkdirSync(sessionRoot, { recursive: true });
+		} catch {}
 		return {
 			runId,
 			shareEnabled: false,
 			sessionDirForIndex: (idx?: number) => path.join(sessionRoot, `run-${idx ?? 0}`),
-			artifactsDir: getArtifactsDir(ctx.sessionManager.getSessionFile() ?? null),
+			artifactsDir: getArtifactsDir(parentSessionFile),
 			artifactConfig: { ...DEFAULT_ARTIFACT_CONFIG } as ArtifactConfig,
 		};
 	};
@@ -1085,7 +1103,8 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 						}
 						const id = randomUUID();
 						const asyncCtx = { pi, cwd: ctx.cwd, currentSessionId: ctx.sessionManager.getSessionId() ?? id };
-						const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
+						const asyncSessionRoot = getSubagentSessionRoot(ctx.sessionManager.getSessionFile() ?? null);
+						try { fs.mkdirSync(asyncSessionRoot, { recursive: true }); } catch {}
 						executeAsyncChain(id, {
 							chain: r.requestedAsync.chain,
 							agents,
@@ -1094,7 +1113,7 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 							artifactsDir: exec.artifactsDir,
 							artifactConfig: exec.artifactConfig,
 							shareEnabled: false,
-							sessionRoot,
+							sessionRoot: asyncSessionRoot,
 							chainSkills: r.requestedAsync.chainSkills,
 						}).then((asyncResult) => {
 							pi.sendUserMessage(asyncResult.content[0]?.text || "(launched in background)");

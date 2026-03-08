@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-03-08
+
+### Changed
+- **Session persistence**: Subagent sessions are now stored alongside the parent session file instead of in `/tmp`. If the parent session is `~/.pi/agent/sessions/abc123.jsonl`, subagent sessions go to `~/.pi/agent/sessions/abc123/{runId}/run-{N}/`. This enables tracking subagent performance over time, analyzing token usage patterns, and debugging past delegations. Falls back to a unique temp directory when no parent session exists (API/headless mode).
+
 ## [0.11.0] - 2026-02-23
 
 ### Added
